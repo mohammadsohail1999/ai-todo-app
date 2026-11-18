@@ -15,7 +15,8 @@ export async function GET() {
 
     if (error) throw error;
 
-    return Response.json({ ok: true });
+    // checkedAt shows the response is fresh, not a cached copy.
+    return Response.json({ ok: true, checkedAt: new Date().toISOString() });
   } catch (error) {
     console.error("Supabase read failed:", error);
     return Response.json({ ok: false }, { status: 500 });
