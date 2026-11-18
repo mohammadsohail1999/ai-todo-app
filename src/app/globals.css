@@ -41,3 +41,74 @@ a {
   color: inherit;
   text-decoration: none;
 }
+
+.auth {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  max-width: 360px;
+  margin: 64px auto;
+  padding: 0 16px;
+}
+
+.auth a {
+  text-decoration: underline;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.auth input,
+.auth button {
+  padding: 8px 12px;
+  font: inherit;
+}
+
+.auth button {
+  cursor: pointer;
+}
+
+.auth-form button {
+  margin-top: 8px;
+}
+
+.auth-error {
+  color: #d32f2f;
+}
+
+.home {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  max-width: 560px;
+  margin: 64px auto;
+  padding: 0 16px;
+}
+
+.home input:not([type="checkbox"]),
+.home button {
+  padding: 8px 12px;
+  font: inherit;
+}
+
+.home button {
+  cursor: pointer;
+}
+
+.home-account {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+@media (prefers-color-scheme: dark) {
+  html {
+    color-scheme: dark;
+  }
+}
