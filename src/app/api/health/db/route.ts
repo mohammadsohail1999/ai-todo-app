@@ -1,15 +1,18 @@
 import { connection } from "next/server";
-import { createAdminClient } from "@/lib/supabase/admin";
+import { getVerifiedUser } from "@/lib/auth";
 
-// Phase 1 test route: proves the app can reach Supabase and the todos table exists.
-// It uses the secret-key client because there are no logins yet. Phase 2 replaces it
-// with a session check, so the read runs as the logged-in user under Row Level Security.
+// Test route: proves a logged-in user's session reaches Supabase, under Row Level Security.
 export async function GET() {
   // Run at request time only. Without this, `next build` runs the query and can freeze the response.
   await connection();
 
   try {
-    const { error } = await createAdminClient()
+    const user = await getVerifiedUser();
+    if (!user) {
+      return Response.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const { error } = await user.supabase
       .from("todos")
       .select("id", { head: true, count: "exact" });
 
