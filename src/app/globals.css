@@ -107,6 +107,55 @@ a {
   gap: 16px;
 }
 
+.todos {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.todos time {
+  font-size: 1rem;
+  font-weight: normal;
+  opacity: 0.7;
+}
+
+.todos-add {
+  display: flex;
+  gap: 8px;
+}
+
+.todos-add input {
+  flex: 1;
+  min-width: 0;
+}
+
+.todos-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  list-style: none;
+}
+
+.todos-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.todos-list label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.todos-list .done span {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
 @media (prefers-color-scheme: dark) {
   html {
     color-scheme: dark;
