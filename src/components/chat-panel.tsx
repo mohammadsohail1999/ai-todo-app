@@ -33,25 +33,18 @@ async function* readEvents(body: ReadableStream<Uint8Array>) {
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
-    const chunk = decoder.decode(value, { stream: true });
-    console.log("[chat] chunk:", JSON.stringify(chunk));
-    buffer += chunk;
+    buffer += decoder.decode(value, { stream: true });
 
     // A chunk can end mid-line, so keep the unfinished part for the next chunk.
     const lines = buffer.split("\n");
     buffer = lines.pop() ?? "";
-    console.log("[chat] complete lines:", lines.length, "leftover buffer:", JSON.stringify(buffer));
     for (const line of lines) {
       if (!line.trim()) continue;
-      const event = JSON.parse(line) as ChatEvent;
-      console.log("[chat] event:", event);
-      yield event;
+      yield JSON.parse(line) as ChatEvent;
     }
   }
   if (buffer.trim()) {
-    const event = JSON.parse(buffer) as ChatEvent;
-    console.log("[chat] event (final leftover):", event);
-    yield event;
+    yield JSON.parse(buffer) as ChatEvent;
   }
 }
 
