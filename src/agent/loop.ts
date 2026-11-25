@@ -33,6 +33,9 @@ type RunAgentLoopOptions = {
   messages: Anthropic.MessageParam[];
   ctx: ToolContext;
   onEvent?: (event: LoopEvent) => void;
+  // Called whenever `messages` is a valid history to save: after each round of tool
+  // results, and after the final answer. The chat route saves the thread here.
+  onCheckpoint?: (messages: Anthropic.MessageParam[]) => Promise<void>;
 };
 
 export async function runAgentLoop({
@@ -42,6 +45,7 @@ export async function runAgentLoop({
   messages,
   ctx,
   onEvent = () => {},
+  onCheckpoint = async () => {},
 }: RunAgentLoopOptions): Promise<LoopResult> {
   const usage: Anthropic.Usage[] = [];
   let jsonRetries = 0;
@@ -98,7 +102,10 @@ export async function runAgentLoop({
     // Saved exactly as received, thinking blocks included. Editing them breaks later requests.
     messages.push({ role: "assistant", content: message.content });
 
-    if (calls.length === 0) return { status: "done", usage };
+    if (calls.length === 0) {
+      await onCheckpoint(messages);
+      return { status: "done", usage };
+    }
 
     // Parallel calls run together, and all their results go back in ONE user message.
     const results = await Promise.all(
@@ -110,6 +117,8 @@ export async function runAgentLoop({
       }),
     );
     messages.push({ role: "user", content: results });
+    // Every tool_use now has its tool_result, so this history is safe to save.
+    await onCheckpoint(messages);
   }
 
   return { status: "iteration_limit", usage };

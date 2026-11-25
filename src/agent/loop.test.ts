@@ -247,6 +247,45 @@ describe("runAgentLoop", () => {
     expect(requests).toHaveLength(2);
   });
 
+  it("checkpoints after each tool round and after the final answer", async () => {
+    vi.mocked(todos.addTodo).mockResolvedValue(todo());
+    const { client } = fakeClient([
+      message([toolUse("add_todo", { title: "buy milk" })], "tool_use"),
+      message([text("Added.")], "end_turn"),
+    ]);
+    const saved: Anthropic.MessageParam[][] = [];
+    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "add milk" }];
+
+    await runAgentLoop({
+      client,
+      model: "test-model",
+      system: "test",
+      messages,
+      ctx,
+      onCheckpoint: async (history) => {
+        saved.push(structuredClone(history));
+      },
+    });
+
+    expect(saved).toHaveLength(2);
+    // First save ends with the tool results, so every tool_use already has its answer.
+    expect(saved[0]).toHaveLength(3);
+    expect(saved[0].at(-1)?.role).toBe("user");
+    // Second save is the whole thread, ending with the answer.
+    expect(saved[1]).toEqual(messages);
+    expect(saved[1].at(-1)?.role).toBe("assistant");
+  });
+
+  it("doesn't checkpoint a refused turn", async () => {
+    const { client } = fakeClient([message([text("No.")], "refusal")]);
+    const onCheckpoint = vi.fn(async () => {});
+    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "hi" }];
+
+    await runAgentLoop({ client, model: "test-model", system: "test", messages, ctx, onCheckpoint });
+
+    expect(onCheckpoint).not.toHaveBeenCalled();
+  });
+
   it("throws API errors to the caller instead of retrying", async () => {
     const apiError = new Anthropic.InternalServerError(500, undefined, "boom", new Headers());
     const { client, requests } = fakeClient([apiError]);

@@ -2,7 +2,7 @@ import { redirect } from "next/navigation";
 import { connection } from "next/server";
 import { Suspense } from "react";
 import { logout } from "@/app/actions/auth";
-import { TodayTodos } from "@/components/today-todos";
+import { TodayView } from "@/components/today-view";
 import { getVerifiedUser } from "@/lib/auth";
 
 export default function Home() {
@@ -32,7 +32,7 @@ async function Today() {
           <button type="submit">Log out</button>
         </form>
       </div>
-      <TodayTodos />
+      <TodayView />
     </>
   );
 }

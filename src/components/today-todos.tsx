@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type SubmitEvent } from "react";
 import type { Todo, TodoStatus } from "@/lib/todos";
 
 const browserTimeZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -17,7 +17,8 @@ async function fetchToday() {
   return (await response.json()) as { date: string; todos: Todo[] };
 }
 
-export function TodayTodos() {
+// refreshSignal: bump it to make the list reload, e.g. when the assistant changes a todo.
+export function TodayTodos({ refreshSignal = 0 }: { refreshSignal?: number }) {
   const router = useRouter();
   const [date, setDate] = useState<string | null>(null);
   const [todos, setTodos] = useState<Todo[]>([]);
@@ -54,6 +55,11 @@ export function TodayTodos() {
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [reload]);
 
+  // 0 is the first render, which the effect above already loads.
+  useEffect(() => {
+    if (refreshSignal > 0) reload();
+  }, [refreshSignal, reload]);
+
   // Runs one change, then reloads from the server instead of patching local state.
   async function change(request: () => Promise<Response>, failure: string) {
     setBusy(true);
@@ -75,7 +81,7 @@ export function TodayTodos() {
     }
   }
 
-  async function addTodo(event: FormEvent) {
+  async function addTodo(event: SubmitEvent) {
     event.preventDefault();
     const added = await change(
       () =>

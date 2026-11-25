@@ -85,7 +85,7 @@ a {
   flex-direction: column;
   gap: 16px;
   width: 100%;
-  max-width: 560px;
+  max-width: 960px;
   margin: 64px auto;
   padding: 0 16px;
 }
@@ -154,6 +154,72 @@ a {
 .todos-list .done span {
   text-decoration: line-through;
   opacity: 0.6;
+}
+
+/* Today's list and the chat: side by side on wide screens, stacked on phones. */
+.today-view {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 32px;
+}
+
+@media (min-width: 800px) {
+  .today-view {
+    grid-template-columns: 1fr 1fr;
+    align-items: start;
+  }
+}
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--foreground) 20%, transparent);
+  border-radius: 8px;
+}
+
+.chat-empty,
+.chat-tool {
+  font-size: 0.875rem;
+  opacity: 0.6;
+}
+
+.chat-bubble {
+  max-width: 85%;
+  padding: 8px 12px;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat-user {
+  align-self: flex-end;
+  background: color-mix(in srgb, var(--foreground) 12%, transparent);
+}
+
+.chat-assistant {
+  align-self: flex-start;
+  border: 1px solid color-mix(in srgb, var(--foreground) 20%, transparent);
+}
+
+.chat-form {
+  display: flex;
+  gap: 8px;
+}
+
+.chat-form input {
+  flex: 1;
+  min-width: 0;
 }
 
 @media (prefers-color-scheme: dark) {
