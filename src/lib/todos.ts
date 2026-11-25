@@ -8,6 +8,8 @@ import { z } from "zod";
 export const todoId = z.uuid();
 export const todoTitle = z.string().trim().min(1).max(200);
 export const todoStatus = z.enum(["open", "done"]);
+// A real calendar date as YYYY-MM-DD, so "2026-02-30" is rejected.
+export const isoDate = z.iso.date();
 
 export type TodoStatus = z.infer<typeof todoStatus>;
 
@@ -22,14 +24,21 @@ export type Todo = {
 
 const TODO_COLUMNS = "id, title, status, date, created_at, completed_at";
 
-// One date, optionally limited to one status.
-export type TodoFilter = { date: string; status?: TodoStatus };
+// One date, or an inclusive range of dates, optionally limited to one status.
+export type TodoFilter = ({ date: string } | { from: string; to: string }) & {
+  status?: TodoStatus;
+};
 
 export async function listTodos(
   supabase: SupabaseClient,
   filter: TodoFilter,
 ): Promise<Todo[]> {
-  let query = supabase.from("todos").select(TODO_COLUMNS).eq("date", filter.date);
+  let query = supabase.from("todos").select(TODO_COLUMNS);
+
+  query =
+    "date" in filter
+      ? query.eq("date", filter.date)
+      : query.gte("date", filter.from).lte("date", filter.to);
   if (filter.status) query = query.eq("status", filter.status);
 
   const { data, error } = await query.order("date").order("created_at");
@@ -65,6 +74,23 @@ export async function setTodoStatus(
       status,
       completed_at: status === "done" ? new Date().toISOString() : null,
     })
+    .eq("id", id)
+    .select(TODO_COLUMNS)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data as Todo | null;
+}
+
+// Moves a todo to another day, keeping its status. Returns null when no todo matched.
+export async function moveTodo(
+  supabase: SupabaseClient,
+  id: string,
+  date: string,
+): Promise<Todo | null> {
+  const { data, error } = await supabase
+    .from("todos")
+    .update({ date })
     .eq("id", id)
     .select(TODO_COLUMNS)
     .maybeSingle();
