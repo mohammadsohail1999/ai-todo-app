@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MAX_ITERATIONS, runAgentLoop } from "@/agent/loop";
-import type { ToolContext } from "@/agent/tools";
+import { resolvePending, type ToolContext } from "@/agent/tools";
 import * as todos from "@/lib/todos";
 import type { Todo } from "@/lib/todos";
 
@@ -14,6 +14,7 @@ vi.mock("@/lib/todos", async (importOriginal) => ({
   setTodoStatus: vi.fn(),
   moveTodo: vi.fn(),
   deleteTodo: vi.fn(),
+  getTodosByIds: vi.fn(),
 }));
 
 const TODAY = "2026-11-09";
@@ -176,8 +177,8 @@ describe("runAgentLoop", () => {
     expect(toolResult.content).toContain("invalid_input");
   });
 
-  it("reports a missing todo as an error", async () => {
-    vi.mocked(todos.deleteTodo).mockResolvedValue(false);
+  it("reports a missing todo as an error without asking to confirm", async () => {
+    vi.mocked(todos.getTodosByIds).mockResolvedValue([]);
     const { client } = fakeClient([
       message([toolUse("delete_todo", { id: ID_1 })], "tool_use"),
       message([text("I couldn't find it.")], "end_turn"),
@@ -189,6 +190,7 @@ describe("runAgentLoop", () => {
     const [toolResult] = toolResults(messages[2]);
     expect(toolResult.is_error).toBe(true);
     expect(toolResult.content).toContain("No todo with that id");
+    expect(todos.deleteTodo).not.toHaveBeenCalled();
   });
 
   it("stops on a refusal without running tools or saving the turn", async () => {
@@ -293,5 +295,105 @@ describe("runAgentLoop", () => {
 
     await expect(promise).rejects.toBe(apiError);
     expect(requests).toHaveLength(1);
+  });
+});
+
+describe("delete confirmation", () => {
+  // One turn asking to add a todo and delete another, the way "swap X for Y" might arrive.
+  async function pauseOnMixedTurn() {
+    vi.mocked(todos.addTodo).mockResolvedValue(todo({ id: ID_2, title: "call mom" }));
+    vi.mocked(todos.getTodosByIds).mockResolvedValue([todo()]);
+    const add = toolUse("add_todo", { title: "call mom" });
+    const del = toolUse("delete_todo", { id: ID_1 });
+    const { client, requests } = fakeClient([message([add, del], "tool_use")]);
+    const onCheckpoint = vi.fn(async () => {});
+    const messages: Anthropic.MessageParam[] = [{ role: "user", content: "swap them" }];
+
+    const result = await runAgentLoop({
+      client,
+      model: "test-model",
+      system: "test",
+      messages,
+      ctx,
+      onCheckpoint,
+    });
+    return { result, messages, requests, onCheckpoint, add, del };
+  }
+
+  it("runs the safe tools, holds the delete and pauses without a checkpoint", async () => {
+    const { result, messages, requests, onCheckpoint, add, del } = await pauseOnMixedTurn();
+
+    expect(result.status).toBe("confirm_required");
+    if (result.status !== "confirm_required") return;
+    expect(todos.addTodo).toHaveBeenCalledTimes(1);
+    expect(todos.deleteTodo).not.toHaveBeenCalled();
+    expect(requests).toHaveLength(1);
+    // The assistant turn is in history, but its results aren't: the caller saves both
+    // with `pending`, and a checkpoint here would save a tool_use with no tool_result.
+    expect(messages.at(-1)?.role).toBe("assistant");
+    expect(onCheckpoint).not.toHaveBeenCalled();
+    expect(result.pending.deletes).toEqual([{ toolUseId: del.id, todoId: ID_1 }]);
+    expect(result.pending.results.map((r) => r.tool_use_id)).toEqual([add.id]);
+  });
+
+  it("doesn't pause when every delete fails validation", async () => {
+    const { client } = fakeClient([
+      message([toolUse("delete_todo", { id: "nope" })], "tool_use"),
+      message([text("That id looks wrong.")], "end_turn"),
+    ]);
+    const { promise, messages } = run(client);
+
+    const result = await promise;
+
+    expect(result.status).toBe("done");
+    expect(todos.getTodosByIds).toHaveBeenCalledWith(ctx.supabase, []);
+    const [toolResult] = toolResults(messages[2]);
+    expect(toolResult.is_error).toBe(true);
+    expect(toolResult.content).toContain("invalid_input");
+  });
+
+  it("on confirm, deletes and combines every result into one message, in call order", async () => {
+    const { result, messages, add, del } = await pauseOnMixedTurn();
+    if (result.status !== "confirm_required") throw new Error("expected a pause");
+    vi.mocked(todos.deleteTodo).mockResolvedValue(true);
+
+    const reply = await resolvePending(result.pending, "confirm", messages.at(-1)!.content, ctx);
+
+    expect(todos.deleteTodo).toHaveBeenCalledExactlyOnceWith(ctx.supabase, ID_1);
+    const results = toolResults(reply);
+    expect(results.map((r) => r.tool_use_id)).toEqual([add.id, del.id]);
+    expect(results[1].is_error).toBeUndefined();
+    expect(results[1].content).toContain('"deleted":true');
+
+    // The loop resumes from that history like any other turn.
+    messages.push(reply);
+    const { client, requests } = fakeClient([message([text("Done.")], "end_turn")]);
+    const resumed = await runAgentLoop({ client, model: "test-model", system: "test", messages, ctx });
+    expect(resumed.status).toBe("done");
+    expect(requests[0].messages.at(-1)).toEqual(reply);
+  });
+
+  it("on cancel, deletes nothing and tells Claude the user cancelled", async () => {
+    const { result, messages, del } = await pauseOnMixedTurn();
+    if (result.status !== "confirm_required") throw new Error("expected a pause");
+
+    const reply = await resolvePending(result.pending, "cancel", messages.at(-1)!.content, ctx);
+
+    expect(todos.deleteTodo).not.toHaveBeenCalled();
+    const deleteResult = toolResults(reply).find((r) => r.tool_use_id === del.id);
+    expect(deleteResult?.is_error).toBeUndefined();
+    expect(deleteResult?.content).toContain("cancelled");
+  });
+
+  it("on confirm, reports a todo that vanished meanwhile as not found", async () => {
+    const { result, messages, del } = await pauseOnMixedTurn();
+    if (result.status !== "confirm_required") throw new Error("expected a pause");
+    vi.mocked(todos.deleteTodo).mockResolvedValue(false);
+
+    const reply = await resolvePending(result.pending, "confirm", messages.at(-1)!.content, ctx);
+
+    const deleteResult = toolResults(reply).find((r) => r.tool_use_id === del.id);
+    expect(deleteResult?.is_error).toBe(true);
+    expect(deleteResult?.content).toContain("No todo with that id");
   });
 });

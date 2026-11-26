@@ -47,6 +47,23 @@ export async function listTodos(
   return data as Todo[];
 }
 
+// The todos among `ids` that this user can see. Missing or other users' ids are left out.
+export async function getTodosByIds(
+  supabase: SupabaseClient,
+  ids: string[],
+): Promise<Todo[]> {
+  if (ids.length === 0) return [];
+  const { data, error } = await supabase
+    .from("todos")
+    .select(TODO_COLUMNS)
+    .in("id", ids)
+    .order("date")
+    .order("created_at");
+
+  if (error) throw error;
+  return data as Todo[];
+}
+
 export async function addTodo(
   supabase: SupabaseClient,
   { title, date }: { title: string; date: string },

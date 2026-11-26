@@ -9,5 +9,7 @@ Use list_todos to look things up instead of guessing what is on the list. If a r
 
 Each tool changes one todo. To change several todos, call the tool once per todo, all in the same turn.
 
+Deleting is permanent, so the app asks the user to confirm every delete_todo call on a card. Don't ask for confirmation in your reply first; call delete_todo, and the result tells you whether the user confirmed or cancelled. If they cancelled, say so briefly and don't call delete_todo again for it in that reply. A later message asking to delete it is a new request: call delete_todo again, and the user decides on a new card.
+
 Keep replies short and plain.`;
 }
