@@ -1,9 +1,11 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
+import type { Decision, PendingTurn } from "@/agent/pending";
 import {
   addTodo,
   deleteTodo,
+  getTodosByIds,
   isoDate,
   listTodos,
   moveTodo,
@@ -20,6 +22,9 @@ export type ToolContext = {
   supabase: SupabaseClient;
   today: string;
 };
+
+// Deletes never run straight away: the loop holds them until the user confirms.
+export const DELETE_TOOL = "delete_todo";
 
 // Every tool sets eager_input_streaming, so the API doesn't validate inputs for us.
 // The Zod schemas below are the real check, and run before any tool does.
@@ -99,10 +104,12 @@ export const tools: Anthropic.Tool[] = [
     },
   },
   {
-    name: "delete_todo",
+    name: DELETE_TOOL,
     description:
       "Permanently delete one todo. Only call it when the user clearly asks to delete or remove a " +
-      "todo; to close a finished todo, use set_todo_status instead. Call it once per todo. It needs " +
+      "todo; to close a finished todo, use set_todo_status instead. Call it once per todo; for " +
+      "several todos, make all the calls in the same turn. The app then shows the user one " +
+      "Confirm/Cancel card for all of them, and the result tells you what they chose. It needs " +
       "the todo's `id`, so call list_todos first if you haven't seen the todo yet.",
     eager_input_streaming: true,
     input_schema: {
@@ -217,15 +224,10 @@ export async function runTool(
         return result({ todo });
       }
 
-      // Phase 5 only: deletes without confirmation. Phase 7 replaces this with pause-and-confirm.
-      case "delete_todo": {
-        const input = deleteTodoInput.safeParse(block.input);
-        if (!input.success) return result(invalidInput(block, input.error), true);
-
-        const deleted = await deleteTodo(ctx.supabase, input.data.id);
-        if (!deleted) return result(NOT_FOUND, true);
-        return result({ deleted: true, id: input.data.id });
-      }
+      // The loop sends deletes to holdDeletes instead. This guard keeps any other caller
+      // from deleting without the user's Confirm.
+      case DELETE_TOOL:
+        return result("delete_todo only runs after the user confirms.", true);
 
       default:
         return result(`Unknown tool: ${block.name}`, true);
@@ -235,6 +237,104 @@ export async function runTool(
     console.error(`Tool ${block.name} failed:`, error);
     return result("The tool failed. Tell the user it didn't work.", true);
   }
+}
+
+// Splits a turn's delete calls into ones to hold for the user's decision and ones that fail now.
+// An invalid input or an id the user can't see gets its error result at once, so the card
+// only ever lists todos that exist.
+export async function holdDeletes(
+  blocks: Anthropic.ToolUseBlock[],
+  ctx: ToolContext,
+): Promise<{ held: PendingTurn["deletes"]; results: Anthropic.ToolResultBlockParam[] }> {
+  const held: PendingTurn["deletes"] = [];
+  const results: Anthropic.ToolResultBlockParam[] = [];
+  const valid: { block: Anthropic.ToolUseBlock; todoId: string }[] = [];
+
+  for (const block of blocks) {
+    const input = deleteTodoInput.safeParse(block.input);
+    if (input.success) {
+      valid.push({ block, todoId: input.data.id });
+    } else {
+      results.push(errorResult(block.id, invalidInput(block, input.error)));
+    }
+  }
+
+  let found: Set<string>;
+  try {
+    const todos = await getTodosByIds(ctx.supabase, valid.map((v) => v.todoId));
+    found = new Set(todos.map((todo) => todo.id));
+  } catch (error) {
+    console.error(`Tool ${DELETE_TOOL} failed:`, error);
+    for (const { block } of valid) {
+      results.push(errorResult(block.id, "The tool failed. Tell the user it didn't work."));
+    }
+    return { held, results };
+  }
+
+  for (const { block, todoId } of valid) {
+    if (found.has(todoId)) {
+      held.push({ toolUseId: block.id, todoId });
+    } else {
+      results.push(errorResult(block.id, NOT_FOUND));
+    }
+  }
+
+  return { held, results };
+}
+
+const CANCELLED = "The user cancelled this deletion. The todo was not deleted.";
+
+// Settles a paused turn: deletes on confirm, records the refusal on cancel, and returns the one
+// user message holding a tool_result for every tool_use in the paused assistant message.
+export async function resolvePending(
+  pending: PendingTurn,
+  decision: Decision,
+  assistantContent: Anthropic.MessageParam["content"],
+  ctx: ToolContext,
+): Promise<Anthropic.MessageParam> {
+  const deleteResults = await Promise.all(
+    pending.deletes.map(async ({ toolUseId, todoId }) => {
+      if (decision === "cancel") {
+        return { type: "tool_result" as const, tool_use_id: toolUseId, content: CANCELLED };
+      }
+      try {
+        const deleted = await deleteTodo(ctx.supabase, todoId);
+        if (!deleted) return errorResult(toolUseId, NOT_FOUND);
+        return {
+          type: "tool_result" as const,
+          tool_use_id: toolUseId,
+          content: JSON.stringify({ deleted: true, id: todoId }),
+        };
+      } catch (error) {
+        console.error(`Tool ${DELETE_TOOL} failed:`, error);
+        return errorResult(toolUseId, "The tool failed. Tell the user it didn't work.");
+      }
+    }),
+  );
+
+  // Results keep the order of the calls, so the message reads like an unpaused turn.
+  const byId = new Map(
+    [...pending.results, ...deleteResults].map((result) => [result.tool_use_id, result]),
+  );
+  const order =
+    typeof assistantContent === "string"
+      ? []
+      : assistantContent.flatMap((block) => (block.type === "tool_use" ? [block.id] : []));
+  const content = order.flatMap((id) => {
+    const result = byId.get(id);
+    return result ? [result] : [];
+  });
+
+  return { role: "user", content };
+}
+
+function errorResult(toolUseId: string, content: unknown): Anthropic.ToolResultBlockParam {
+  return {
+    type: "tool_result",
+    tool_use_id: toolUseId,
+    content: typeof content === "string" ? content : JSON.stringify(content),
+    is_error: true,
+  };
 }
 
 // Sends back what was received and why it was rejected, so Claude can correct the call.

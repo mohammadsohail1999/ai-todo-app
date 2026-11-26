@@ -109,6 +109,11 @@ async function main() {
       { input_tokens: 0, output_tokens: 0 },
     );
     console.log(`Status: ${result.status}`);
+    if (result.status === "confirm_required") {
+      // The terminal has no Confirm card, so the held deletes are only shown, never run.
+      console.log("Held for confirmation (not deleted):");
+      console.log(show(result.pending));
+    }
     if (result.status === "iteration_limit") {
       console.log(`Stopped after ${MAX_ITERATIONS} API calls without a final answer.`);
     }

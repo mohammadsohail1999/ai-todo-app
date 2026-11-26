@@ -1,9 +1,10 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState, type SubmitEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type SubmitEvent } from "react";
 import type { ChatEvent, ChatItem } from "@/agent/events";
 import type { LoopStatus } from "@/agent/loop";
+import type { Decision, PendingTodo } from "@/agent/pending";
 
 const MAX_MESSAGE_LENGTH = 500;
 
@@ -14,7 +15,7 @@ const TOOL_LABELS: Record<string, string> = {
   add_todo: "Adding a todo",
   set_todo_status: "Updating a todo",
   move_todo: "Moving a todo",
-  delete_todo: "Deleting a todo",
+  delete_todo: "Asking to delete a todo",
 };
 
 // Shown when a turn ends without a normal answer.
@@ -48,35 +49,54 @@ async function* readEvents(body: ReadableStream<Uint8Array>) {
   }
 }
 
+type ChatState = { items: ChatItem[]; pending: PendingTodo[] | null };
+
+async function fetchChat(): Promise<ChatState | "unauthorized"> {
+  const response = await fetch(`/api/chat?timeZone=${encodeURIComponent(browserTimeZone())}`);
+  if (response.status === 401) return "unauthorized";
+  if (!response.ok) throw new Error("Request failed");
+  return (await response.json()) as ChatState;
+}
+
 export function ChatPanel({ onTodosChanged }: { onTodosChanged: () => void }) {
   const router = useRouter();
   const [items, setItems] = useState<ChatItem[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  // Todos waiting for Confirm or Cancel. While set, no new message can be sent.
+  const [pending, setPending] = useState<PendingTodo[] | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  // Set at once, unlike `streaming`, so a fast double click can't send two requests.
+  const busy = useRef(false);
 
-  // Load today's saved thread, so the chat survives a refresh.
+  // Loads today's saved thread and any paused delete, so both survive a refresh.
+  const load = useCallback(
+    (isCancelled: () => boolean = () => false) =>
+      fetchChat()
+        .then((data) => {
+          if (data === "unauthorized") return router.push("/login");
+          if (isCancelled()) return;
+          setItems(data.items);
+          setPending(data.pending);
+        })
+        .catch(() => {
+          if (!isCancelled()) setNotice("Couldn't load the chat.");
+        }),
+    [router],
+  );
+
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/chat?timeZone=${encodeURIComponent(browserTimeZone())}`)
-      .then(async (response) => {
-        if (response.status === 401) return router.push("/login");
-        if (!response.ok) throw new Error("Request failed");
-        const data = (await response.json()) as { items: ChatItem[] };
-        if (!cancelled) setItems(data.items);
-      })
-      .catch(() => {
-        if (!cancelled) setNotice("Couldn't load the chat.");
-      });
+    load(() => cancelled);
     return () => {
       cancelled = true;
     };
-  }, [router]);
+  }, [load]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "nearest" });
-  }, [items]);
+  }, [items, pending]);
 
   // Text joins the assistant bubble that's still growing; after a tool line, a new one starts.
   function addText(delta: string) {
@@ -100,6 +120,9 @@ export function ChatPanel({ onTodosChanged }: { onTodosChanged: () => void }) {
       case "todos_changed":
         onTodosChanged();
         break;
+      case "confirm_required":
+        setPending(event.todos);
+        break;
       case "done":
         setNotice(STATUS_NOTICES[event.status] ?? null);
         break;
@@ -109,34 +132,57 @@ export function ChatPanel({ onTodosChanged }: { onTodosChanged: () => void }) {
     }
   }
 
-  async function send(event: SubmitEvent) {
-    event.preventDefault();
-    const message = input.trim();
-    if (!message || streaming) return;
-
+  // Posts to a chat route and plays its stream. A 409 means the server's state moved on
+  // (a delete is pending, or was already settled elsewhere), so reload it.
+  async function stream(url: string, body: object) {
+    if (busy.current) return;
+    busy.current = true;
     setStreaming(true);
     setNotice(null);
-    setInput("");
-    setItems((current) => [...current, { role: "user", text: message }]);
 
     try {
-      const response = await fetch("/api/chat", {
+      const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, timeZone: browserTimeZone() }),
+        body: JSON.stringify({ ...body, timeZone: browserTimeZone() }),
       });
       if (response.status === 401) {
         router.push("/login");
+        return;
+      }
+      if (response.status === 409) {
+        const data = (await response.json().catch(() => null)) as { error?: string } | null;
+        await load();
+        setNotice(data?.error ?? "The chat changed. It has been reloaded.");
         return;
       }
       if (!response.ok || !response.body) throw new Error("Request failed");
 
       for await (const chatEvent of readEvents(response.body)) handle(chatEvent);
     } catch {
+      // Show what the server saved, so a lost card or half-shown reply doesn't linger.
+      await load();
       setNotice("Couldn't reach the assistant. Try again.");
     } finally {
+      busy.current = false;
       setStreaming(false);
     }
+  }
+
+  async function send(event: SubmitEvent) {
+    event.preventDefault();
+    const message = input.trim();
+    if (!message || streaming || pending) return;
+
+    setInput("");
+    setItems((current) => [...current, { role: "user", text: message }]);
+    await stream("/api/chat", { message });
+  }
+
+  async function decide(decision: Decision) {
+    if (busy.current || !pending) return;
+    setPending(null);
+    await stream("/api/chat/confirm", { decision });
   }
 
   return (
@@ -158,6 +204,37 @@ export function ChatPanel({ onTodosChanged }: { onTodosChanged: () => void }) {
             </p>
           ),
         )}
+        {pending && (
+          <div className="confirm-card" role="group" aria-label="Confirm deletion">
+            <p>
+              Delete {pending.length === 1 ? "this todo" : `these ${pending.length} todos`}?
+              This can&apos;t be undone.
+            </p>
+            {pending.length > 0 ? (
+              <ul>
+                {pending.map((todo) => (
+                  <li key={todo.id}>
+                    {todo.title} <span className="confirm-date">{todo.date}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="confirm-date">These todos no longer exist.</p>
+            )}
+            <div className="confirm-actions">
+              <button type="button" onClick={() => decide("confirm")} disabled={streaming}>
+                Delete
+              </button>
+              <button
+                type="button"
+                onClick={() => decide("cancel")}
+                disabled={streaming}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
         {streaming && items.at(-1)?.role !== "assistant" && (
           <p className="chat-tool">Thinking…</p>
         )}
@@ -177,9 +254,9 @@ export function ChatPanel({ onTodosChanged }: { onTodosChanged: () => void }) {
           value={input}
           onChange={(event) => setInput(event.target.value)}
           maxLength={MAX_MESSAGE_LENGTH}
-          disabled={streaming}
+          disabled={streaming || pending !== null}
         />
-        <button type="submit" disabled={streaming || !input.trim()}>
+        <button type="submit" disabled={streaming || pending !== null || !input.trim()}>
           Send
         </button>
       </form>

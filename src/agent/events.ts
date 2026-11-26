@@ -1,5 +1,6 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type { LoopStatus } from "@/agent/loop";
+import type { PendingTodo } from "@/agent/pending";
 
 // Shared by the chat route and the chat panel, so it must not import anything server-only.
 
@@ -9,6 +10,8 @@ export type ChatEvent =
   | { type: "tool_start"; name: string }
   | { type: "tool_result"; name: string; ok: boolean }
   | { type: "todos_changed" }
+  // The turn paused on deletes. Titles come from the database. The stream ends after this.
+  | { type: "confirm_required"; todos: PendingTodo[] }
   | { type: "done"; status: LoopStatus }
   | { type: "error"; message: string };
 

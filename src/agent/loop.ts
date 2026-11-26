@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { runTool, tools, type ToolContext } from "@/agent/tools";
+import type { PendingTurn } from "@/agent/pending";
+import { DELETE_TOOL, holdDeletes, runTool, tools, type ToolContext } from "@/agent/tools";
 
 // Hand-written on purpose: this loop is what the project is for. Don't swap in Tool Runner.
 
@@ -7,7 +8,12 @@ export const MAX_ITERATIONS = 8; // guards against a runaway loop; each iteratio
 const MAX_TOKENS = 4096;
 const MAX_JSON_RETRIES = 2;
 
-export type LoopStatus = "done" | "refused" | "truncated" | "iteration_limit";
+export type LoopStatus =
+  | "done"
+  | "refused"
+  | "truncated"
+  | "iteration_limit"
+  | "confirm_required";
 
 // Everything the loop does, in order. The terminal script prints all of it;
 // the chat route (Phase 6) will turn some of it into stream events.
@@ -19,10 +25,18 @@ export type LoopEvent =
   | { type: "tool_result"; result: Anthropic.ToolResultBlockParam }
   | { type: "retry"; iteration: number; error: unknown };
 
-export type LoopResult = {
-  status: LoopStatus;
-  usage: Anthropic.Usage[]; // one entry per API call
-};
+export type LoopResult =
+  | {
+      status: Exclude<LoopStatus, "confirm_required">;
+      usage: Anthropic.Usage[]; // one entry per API call
+    }
+  | {
+      // The turn asked for deletes. `messages` ends with that assistant turn, and the caller
+      // must save it together with `pending`: neither is valid history without the other.
+      status: "confirm_required";
+      usage: Anthropic.Usage[];
+      pending: PendingTurn;
+    };
 
 type RunAgentLoopOptions = {
   client: Anthropic;
@@ -107,15 +121,37 @@ export async function runAgentLoop({
       return { status: "done", usage };
     }
 
-    // Parallel calls run together, and all their results go back in ONE user message.
-    const results = await Promise.all(
-      calls.map(async (block) => {
-        onEvent({ type: "tool_start", block });
-        const result = await runTool(block, ctx);
-        onEvent({ type: "tool_result", result });
-        return result;
-      }),
+    // Deletes are held for the user's Confirm; everything else runs now, in parallel.
+    const deletes = calls.filter((block) => block.name === DELETE_TOOL);
+    const others = calls.filter((block) => block.name !== DELETE_TOOL);
+
+    for (const block of deletes) onEvent({ type: "tool_start", block });
+    const [otherResults, { held, results: deleteErrors }] = await Promise.all([
+      Promise.all(
+        others.map(async (block) => {
+          onEvent({ type: "tool_start", block });
+          const result = await runTool(block, ctx);
+          onEvent({ type: "tool_result", result });
+          return result;
+        }),
+      ),
+      holdDeletes(deletes, ctx),
+    ]);
+    for (const result of deleteErrors) onEvent({ type: "tool_result", result });
+
+    // Results stay in call order, so the message reads the same as when nothing is held.
+    const byId = new Map(
+      [...otherResults, ...deleteErrors].map((result) => [result.tool_use_id, result]),
     );
+    const results = calls.flatMap((block) => byId.get(block.id) ?? []);
+
+    if (held.length > 0) {
+      // A request can't wait for a person, so the turn stops here. No checkpoint: this
+      // history has tool_use blocks without results until the user decides.
+      return { status: "confirm_required", usage, pending: { deletes: held, results } };
+    }
+
+    // Parallel calls run together, and all their results go back in ONE user message.
     messages.push({ role: "user", content: results });
     // Every tool_use now has its tool_result, so this history is safe to save.
     await onCheckpoint(messages);
